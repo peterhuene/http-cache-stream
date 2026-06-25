@@ -289,7 +289,7 @@ mod test {
         assert!(!cache.storage().body_path(&key).is_file());
 
         // Response should *still* not be served from the cache or stored
-        let response = client.get("http://test.local/").send().await.unwrap();
+        let response = client.get(URI).send().await.unwrap();
         assert_eq!(
             response.headers().get(header::CACHE_CONTROL).unwrap(),
             "no-store"
@@ -345,7 +345,7 @@ mod test {
         // Second response should be served from the cache without revalidation
         // If a revalidation is made, the mock middleware will panic since there was
         // only one response defined
-        let response = client.get("http://test.local/").send().await.unwrap();
+        let response = client.get(URI).send().await.unwrap();
         assert_eq!(
             response.headers().get(header::CACHE_CONTROL).unwrap(),
             "max-age=1000"
@@ -402,7 +402,7 @@ mod test {
         );
 
         // First response should be a miss
-        let response = client.get("http://test.local/").send().await.unwrap();
+        let response = client.get(URI).send().await.unwrap();
         assert_eq!(response.headers().get(X_CACHE_LOOKUP).unwrap(), "MISS");
         assert_eq!(response.headers().get(X_CACHE).unwrap(), "MISS");
         assert!(response.headers().get(X_CACHE_KEY).is_none());
@@ -418,7 +418,7 @@ mod test {
         assert!(!state.lock().unwrap().revalidated);
 
         // Second response should be served from the cache
-        let response = client.get("http://test.local/").send().await.unwrap();
+        let response = client.get(URI).send().await.unwrap();
         assert_eq!(response.headers().get(X_CACHE_LOOKUP).unwrap(), "HIT");
         assert_eq!(response.headers().get(X_CACHE).unwrap(), "HIT");
         assert_eq!(
@@ -476,7 +476,7 @@ mod test {
         );
 
         // First response should be a miss
-        let response = client.get("http://test.local/").send().await.unwrap();
+        let response = client.get(URI).send().await.unwrap();
         assert_eq!(response.headers().get(X_CACHE_LOOKUP).unwrap(), "MISS");
         assert_eq!(response.headers().get(X_CACHE).unwrap(), "MISS");
         assert!(response.headers().get(X_CACHE_KEY).is_none());
@@ -492,7 +492,8 @@ mod test {
         assert!(!state.lock().unwrap().revalidated);
 
         // Second response should not be served from the cache (was modified)
-        let response = client.get("http://test.local/").send().await.unwrap();
+        let response = client.get(URI).send().await.unwrap();
+
         assert_eq!(response.headers().get(X_CACHE_LOOKUP).unwrap(), "HIT");
         assert_eq!(response.headers().get(X_CACHE).unwrap(), "MISS");
         assert!(response.headers().get(X_CACHE_KEY).is_none());
@@ -508,7 +509,8 @@ mod test {
         assert!(std::mem::take(&mut state.lock().unwrap().revalidated));
 
         // Second response should be served from the cache (not modified)
-        let response = client.get("http://test.local/").send().await.unwrap();
+        let response = client.get(URI).send().await.unwrap();
+
         assert_eq!(response.headers().get(X_CACHE_LOOKUP).unwrap(), "HIT");
         assert_eq!(response.headers().get(X_CACHE).unwrap(), "HIT");
         assert_eq!(

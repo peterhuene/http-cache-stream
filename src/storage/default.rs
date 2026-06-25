@@ -132,8 +132,8 @@ struct CachedResponse {
 /// are saved to the cache.
 ///
 /// Once the response body has been fully read, the temporary file is atomically
-/// renamed to its content directory location; if the content already exists,
-/// the temporary file is deleted.
+/// renamed to its content directory location and will replace any existing
+/// file.
 ///
 /// ## Integrity
 ///
@@ -160,50 +160,21 @@ impl DefaultCacheStorage {
 
 impl CacheStorage for DefaultCacheStorage {
     async fn get<B: Body + Send>(&self, key: &str) -> Result<Option<StoredResponse<B>>> {
-        let cached = match self.0.read_response(key).await? {
+        let (response, body) = match self.0.read_response(key).await? {
             Some(response) => response,
-            None => return Ok(None),
-        };
-
-        // Open the response body
-        let path = self.body_path(key);
-        let body = match runtime::File::open(&path)
-            .await
-            .map(Some)
-            .or_else(|e| {
-                if e.kind() == io::ErrorKind::NotFound {
-                    Ok(None)
-                } else {
-                    Err(e)
-                }
-            })
-            .with_context(|| {
-                format!(
-                    "failed to open response body `{path}`",
-                    path = path.display()
-                )
-            })? {
-            Some(file) => file,
             None => return Ok(None),
         };
 
         // Build a response from the cached parts
         let mut builder = Response::builder()
-            .version(cached.version)
-            .status(cached.status);
+            .version(response.version)
+            .status(response.status);
         let headers = builder.headers_mut().expect("should be valid");
-        headers.extend(cached.headers);
+        headers.extend(response.headers);
 
         Ok(Some(StoredResponse {
-            response: builder
-                .body(CacheBody::from_file(body).await.with_context(|| {
-                    format!(
-                        "failed to create response body for `{path}`",
-                        path = path.display()
-                    )
-                })?)
-                .expect("should be valid"),
-            policy: cached.policy,
+            response: builder.body(body).expect("should be valid"),
+            policy: response.policy,
         }))
     }
 
@@ -321,23 +292,65 @@ impl DefaultCacheStorageInner {
     /// Reads a response from storage for the given key.
     ///
     /// This method will block if the response file is exclusively locked.
-    async fn read_response(&self, key: &str) -> Result<Option<CachedResponse>> {
+    ///
+    /// Returns `Ok(None)` if the cache entry doesn't exist or is otherwise
+    /// invalid.
+    ///
+    /// Returns both the the cached response and body.
+    async fn read_response<B: Body + Send>(
+        &self,
+        key: &str,
+    ) -> Result<Option<(CachedResponse, CacheBody<B>)>> {
         // Acquire a shared lock on the response file
-        let mut response = match self.lock_response_shared(key).await? {
+        let mut lock = match self.lock_response_shared(key).await? {
             Some(file) => file,
             None => return Ok(None),
         };
 
-        // Decode the cached response
-        Ok(bincode::deserialize_from(&mut response)
-            .inspect_err(|e| {
+        // Deserialize the entry
+        let response: CachedResponse = match bincode::deserialize_from(&mut lock) {
+            Ok(response) => response,
+            Err(e) => {
                 debug!(
                     "failed to deserialize response file `{path}`: {e} (cache entry will be \
                      ignored)",
                     path = self.response_path(key).display()
                 );
+                return Ok(None);
+            }
+        };
+
+        // Open the response body
+        let path = self.content_path(key);
+        let body = match runtime::File::open(&path)
+            .await
+            .map(Some)
+            .or_else(|e| {
+                if e.kind() == io::ErrorKind::NotFound {
+                    Ok(None)
+                } else {
+                    Err(e)
+                }
             })
-            .ok())
+            .with_context(|| {
+                format!(
+                    "failed to open response body `{path}`",
+                    path = path.display()
+                )
+            })? {
+            Some(file) => file,
+            None => return Ok(None),
+        };
+
+        Ok(Some((
+            response,
+            CacheBody::from_file(lock, body).await.with_context(|| {
+                format!(
+                    "failed to create response body for `{path}`",
+                    path = path.display()
+                )
+            })?,
+        )))
     }
 
     /// Writes a response to storage for the given key.
@@ -350,13 +363,11 @@ impl DefaultCacheStorageInner {
         content: Option<TempPath>,
     ) -> Result<()> {
         // Acquire a shared lock on the response file
-        let mut file = self.lock_response_exclusive(key).await?;
+        // This will truncate the response file and invalidate the cache entry should
+        // the remainder of this method fail
+        let mut lock = self.lock_response_exclusive(key).await?;
 
-        // Encode the response
-        bincode::serialize_into(&mut file, &response)
-            .with_context(|| format!("failed to serialize response data for cache key `{key}`"))
-            .map(|_| ())?;
-
+        // Persist the content file before writing the response file
         if let Some(content) = content {
             let content_path = self.content_path(key);
             fs::create_dir_all(content_path.parent().expect("should have parent"))
@@ -371,7 +382,10 @@ impl DefaultCacheStorageInner {
             })?;
         }
 
-        Ok(())
+        // Encode the response file; if this succeeds, the cache entry is valid
+        bincode::serialize_into(&mut lock, &response)
+            .with_context(|| format!("failed to serialize response data for cache key `{key}`"))
+            .map(|_| ())
     }
 
     /// Locks a response file for shared access.

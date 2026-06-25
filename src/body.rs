@@ -1,5 +1,6 @@
 //! Implementation of a HTTP body.
 
+use std::fs::File;
 use std::io;
 use std::path::Path;
 use std::pin::Pin;
@@ -237,6 +238,8 @@ pin_project! {
         // The cache file being read.
         #[pin]
         reader: runtime::BufReader<runtime::File>,
+        // The lock file held while the body is being read.
+        lock: File,
         // The length of the file.
         len: u64,
         // The current read buffer.
@@ -398,13 +401,14 @@ where
     }
 
     /// Constructs a new body from a local file.
-    pub(crate) async fn from_file(file: runtime::File) -> Result<Self> {
+    pub(crate) async fn from_file(lock: File, file: runtime::File) -> Result<Self> {
         let metadata = file.metadata().await?;
 
         Ok(Self {
             source: BodySource::File {
                 source: FileSource {
                     reader: runtime::BufReader::new(file),
+                    lock,
                     len: metadata.len(),
                     buf: BytesMut::new(),
                     finished: false,
